@@ -24,6 +24,94 @@
   function money(n) { return 'KSh ' + Number(n || 0).toLocaleString('en-KE'); }
   function $(id) { return document.getElementById(id); }
 
+  // Robust asking-price parser (mirrors backend/src/price.js). Accepts numbers,
+  // currency symbols/words, thousands separators, k/m/b suffixes and spelled-out
+  // amounts e.g. "KSh 50,000", "50k", "1.2 million", "fifty thousand".
+  var PRICE_UNITS = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9, ten:10, eleven:11, twelve:12, thirteen:13, fourteen:14, fifteen:15, sixteen:16, seventeen:17, eighteen:18, nineteen:19 };
+  var PRICE_TENS = { twenty:20, thirty:30, forty:40, fourty:40, fifty:50, sixty:60, seventy:70, eighty:80, ninety:90 };
+  var PRICE_SCALES = { hundred:100, k:1e3, thousand:1e3, grand:1e3, m:1e6, mil:1e6, million:1e6, millions:1e6, b:1e9, bn:1e9, billion:1e9, billions:1e9 };
+  function parsePrice(input) {
+    if (input == null) return 0;
+    if (typeof input === 'number') return isFinite(input) && input > 0 ? Math.round(input) : 0;
+    var s = String(input).toLowerCase().trim();
+    if (!s) return 0;
+    s = s.replace(/kshs?|kes|shillings?|shs?|bob|usd|dollars?|eur|euros?|gbp|pounds?|ngn|tzs|ugx/g, ' ');
+    s = s.replace(/[$\u20ac\u00a3]/g, ' ');
+    s = s.replace(/\/[=-]/g, ' ');
+    s = s.replace(/,/g, '');
+    s = s.replace(/(\d)\s+(?=\d{3}\b)/g, '$1');
+    s = s.replace(/\s+/g, ' ').trim();
+    if (!s) return 0;
+    var tokens = s.split(/[\s-]+/).filter(Boolean);
+    var total = 0, current = 0, matched = false;
+    for (var i = 0; i < tokens.length; i++) {
+      var t = tokens[i];
+      if (t === 'and' || t === 'a' || t === 'of') continue;
+      var nm = t.match(/^(\d+(?:\.\d+)?)(k|m|b|bn|mil)?$/);
+      if (nm) { var val = parseFloat(nm[1]); if (nm[2]) val *= PRICE_SCALES[nm[2]]; current += val; matched = true; continue; }
+      if (PRICE_UNITS[t] != null) { current += PRICE_UNITS[t]; matched = true; continue; }
+      if (PRICE_TENS[t] != null) { current += PRICE_TENS[t]; matched = true; continue; }
+      if (t === 'hundred') { current = (current || 1) * 100; matched = true; continue; }
+      if (PRICE_SCALES[t] != null) { current = (current || 1) * PRICE_SCALES[t]; total += current; current = 0; matched = true; continue; }
+    }
+    total += current;
+    if (!matched) { var f = parseFloat(s); return isFinite(f) && f > 0 ? Math.round(f) : 0; }
+    return total > 0 ? Math.round(total) : 0;
+  }
+
+  // Live "this is what we'll save" echo under a free-text price input.
+  function priceEcho(inputId, echoId) {
+    var el = $(inputId), out = $(echoId);
+    if (!el || !out) return;
+    function render() {
+      var v = String(el.value || '').trim();
+      var n = parsePrice(v);
+      out.textContent = v ? (n > 0 ? ('\u2248 ' + money(n)) : 'Enter a valid amount') : '';
+    }
+    el.addEventListener('input', render);
+    render();
+  }
+
+  // Turn a free-text description into tidy, organized HTML.
+  // Keeps the author's line breaks, groups consecutive numbered lines
+  // (1. / 1) ) into an ordered list and dash/bullet lines (- * •) into a
+  // bulleted list; everything else becomes paragraphs. Blank lines separate
+  // blocks. All text is HTML-escaped first, so this is XSS-safe.
+  function formatDescription(text) {
+    var raw = String(text == null ? '' : text).replace(/\r\n?/g, '\n').trim();
+    if (!raw) return '';
+    var lines = raw.split('\n');
+    var html = '';
+    var listType = null;   // 'ol' | 'ul' | null
+    var para = [];
+    function flushPara() {
+      if (para.length) { html += '<p>' + para.join('<br>') + '</p>'; para = []; }
+    }
+    function flushList() {
+      if (listType) { html += '</' + listType + '>'; listType = null; }
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line) { flushPara(); flushList(); continue; }
+      var mOl = line.match(/^(\d+)[.)]\s+(.*)$/);
+      var mUl = line.match(/^[-*\u2022]\s+(.*)$/);
+      if (mOl) {
+        flushPara();
+        if (listType !== 'ol') { flushList(); html += '<ol class="desc-list">'; listType = 'ol'; }
+        html += '<li>' + escapeHtml(mOl[2]) + '</li>';
+      } else if (mUl) {
+        flushPara();
+        if (listType !== 'ul') { flushList(); html += '<ul class="desc-list">'; listType = 'ul'; }
+        html += '<li>' + escapeHtml(mUl[1]) + '</li>';
+      } else {
+        flushList();
+        para.push(escapeHtml(line));
+      }
+    }
+    flushPara(); flushList();
+    return '<div class="desc">' + html + '</div>';
+  }
+
   // Simple line icons (no emoji).
   function icon(name) {
     var p = {
@@ -169,7 +257,7 @@
   function initLocationPicker(o) {
     if (!window.L || !document.getElementById(o.mapId)) return null;
     var map = L.map(o.mapId).setView(o.center || [-1.286, 36.817], o.zoom || 12);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap, © CARTO' }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
     var marker = null;
     function status(msg) { var s = o.statusId && document.getElementById(o.statusId); if (s) s.textContent = msg; }
     function setVals(lat, lng) {
@@ -346,7 +434,8 @@
         '<h3>' + escapeHtml(l.title) + '</h3>' + (verified ? '<div class="vrow">' + verified + '</div>' : '') +
         '<div class="loc">' + icon('pin') + ' ' + escapeHtml(l.location || l.region || '') + '</div>' +
         '<div class="meta">' + (l.beds ? '<span>' + icon('bed') + ' ' + l.beds + ' bed</span>' : '') +
-        (l.baths ? '<span>' + icon('bath') + ' ' + l.baths + ' bath</span>' : '') + '</div></div></article>';
+        (l.baths ? '<span>' + icon('bath') + ' ' + l.baths + ' bath</span>' : '') +
+        (l.roomCount ? '<span>' + icon('home') + ' ' + l.roomCount + ' rm</span>' : '') + '</div></div></article>';
     }
 
     var savedOnly = false;
@@ -506,15 +595,16 @@
           '<div class="meta" style="display:flex;gap:16px;color:#5c6b7e;margin:10px 0">' +
           (l.beds ? '<span>' + icon('bed') + ' ' + l.beds + ' bed</span>' : '') +
           (l.baths ? '<span>' + icon('bath') + ' ' + l.baths + ' bath</span>' : '') +
+          (l.roomCount ? '<span>' + icon('home') + ' ' + l.roomCount + ' room' + (l.roomCount > 1 ? 's' : '') + '</span>' : '') +
           (l.type ? '<span>' + icon('tag') + ' ' + escapeHtml(l.type) + '</span>' : '') + '</div>' +
-          '<p>' + escapeHtml(l.description || '') + '</p>' +
+          formatDescription(l.description) +
           generalVideos + showcase + flat + locBlock + enquire + '</div>';
         $('modal').classList.add('open');
         if (hasGeo && window.L) {
           setTimeout(function () {
             try {
               var dm = L.map('detail-map', { scrollWheelZoom: false }).setView([l.lat, l.lng], 16);
-              L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap, © CARTO' }).addTo(dm);
+              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(dm);
               L.marker([l.lat, l.lng]).addTo(dm);
               dm.invalidateSize();
             } catch (e) {}
@@ -673,6 +763,7 @@
       if ($('price-label')) $('price-label').textContent = d === 'rent' ? 'Monthly rent (KSh)' : (isLand ? 'Price (KSh)' : 'Asking price (KSh)');
       if ($('field-beds')) $('field-beds').style.display = isLand ? 'none' : '';
       if ($('field-baths')) $('field-baths').style.display = isLand ? 'none' : '';
+      if ($('field-rooms')) $('field-rooms').style.display = isLand ? 'none' : '';
       if ($('field-size')) $('field-size').style.display = isLand ? '' : 'none';
       if ($('field-type')) { var ti = $('field-type').querySelector('input'); if (ti) ti.placeholder = isLand ? 'Plot, Farm, Commercial…' : 'Bedsitter, 1-bed, Maisonette…'; }
       // Land has no rooms — hide the Standard/Video-Showcase toggle and rooms builder.
@@ -692,7 +783,7 @@
       var isSale = d === 'sale' || d === 'land';
       if (!isSale) { box.style.display = 'none'; return; }
       box.style.display = '';
-      var price = parseFloat((($('h-price') || form.price) || {}).value) || 0;
+      var price = parsePrice((($('h-price') || form.price) || {}).value);
       var pct = Math.round(COMMISSION_RATE * 100);
       if ($('cp-headline')) $('cp-headline').textContent = 'Commission on sale (' + pct + '%)';
       if ($('cp-detail')) {
@@ -706,6 +797,7 @@
     }
     if (dealEl) dealEl.addEventListener('change', updateDeal);
     if ($('h-price')) $('h-price').addEventListener('input', updateCommission);
+    priceEcho('h-price', 'h-price-echo');
     if ($('p-size-value')) $('p-size-value').addEventListener('input', updateFee);
     if ($('p-size-unit')) $('p-size-unit').addEventListener('change', updateFee);
 
@@ -820,6 +912,7 @@
             title: title, deal: form.deal.value, type: form.type.value, price: form.price.value,
             region: form.region.value, location: form.region.value, beds: form.beds.value,
             baths: form.baths.value, description: form.description.value, county: form.county ? form.county.value : '',
+            roomCount: ($('roomCount') ? $('roomCount').value : ''),
             size: sizeStr, areaAcres: areaAcres,
             lat: $('p-lat') ? $('p-lat').value : '', lng: $('p-lng') ? $('p-lng').value : '',
             name: form.name.value, email: form.email.value, phone: phone,
@@ -927,12 +1020,6 @@
       $('subLine').textContent = current.audience + ' · billed ' + billing;
       $('subAmount').textContent = money(amount) + (billing === 'annual' ? ' / year' : ' / month');
       $('subStatus').className = 'status'; $('subStatus').innerHTML = '';
-      subVia = 'mpesa';
-      if ($('subPayVia')) {
-        Array.prototype.forEach.call($('subPayVia').querySelectorAll('button'), function (x) {
-          x.classList.toggle('active', x.getAttribute('data-via') === 'mpesa');
-        });
-      }
       $('subPay').disabled = false; $('subPay').textContent = 'Pay with M-Pesa';
       $('subModal').classList.add('open');
     }
@@ -947,9 +1034,6 @@
         b.addEventListener('click', function () {
           Array.prototype.forEach.call($('subPayVia').querySelectorAll('button'), function (x) { x.classList.remove('active'); });
           b.classList.add('active'); subVia = b.getAttribute('data-via');
-          if ($('subPay').textContent.indexOf('\u2713') === -1) {
-            $('subPay').textContent = subVia === 'pesapal' ? 'Pay by card' : 'Pay with M-Pesa';
-          }
         });
       });
     }
@@ -1150,7 +1234,7 @@
         if (!isSale) { box.style.display = 'none'; }
         else {
           box.style.display = '';
-          var price = parseFloat(($('ag-price') || {}).value) || 0;
+          var price = parsePrice(($('ag-price') || {}).value);
           var pct = Math.round(COMMISSION_RATE * 100);
           if ($('ag-cp-headline')) $('ag-cp-headline').textContent = 'Commission on sale (' + pct + '%)';
           if ($('ag-cp-detail')) $('ag-cp-detail').innerHTML = price > 0
@@ -1161,6 +1245,7 @@
     }
     if (agDeal) agDeal.addEventListener('change', agUpdateDeal);
     if ($('ag-price')) $('ag-price').addEventListener('input', agUpdateDeal);
+    priceEcho('ag-price', 'ag-price-echo');
 
     function guard(res) { if (res && res.status === 401) { clearAuth(); location.href = '/account.html'; } return res; }
 
